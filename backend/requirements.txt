@@ -13,3 +13,4 @@ pandas
 openpyxl
 groq
 google-generativeai
+python-jose[cryptography]

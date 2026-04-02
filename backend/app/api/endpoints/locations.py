@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pymongo.database import Database
 from typing import List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from ...db.session import get_db
 from ...schemas import UserOut, UserRole
 from ..deps import get_current_active_user, check_role
@@ -17,14 +17,25 @@ def update_location(
     current_user: UserOut = Depends(get_current_active_user)
 ):
     # Only agents can update their location
-    if current_user.role != UserRole.AGENT.value:
+    if current_user.role != UserRole.AGENT.value and current_user.role != UserRole.AGENT:
          raise HTTPException(status_code=403, detail="Only agents can update location")
     
+    # Rate limiting: skip if last update was less than 30 seconds ago
+    agent_id = str(current_user.id)
+    last_location = db.agent_locations.find_one(
+        {"agent_id": agent_id},
+        sort=[("timestamp", -1)]
+    )
+    if last_location:
+        time_diff = datetime.now(timezone.utc) - last_location.get("timestamp", datetime.min.replace(tzinfo=timezone.utc))
+        if time_diff.total_seconds() < 30:
+            return {"status": "skipped", "reason": "Too frequent. Minimum 30s interval."}
+    
     new_location = {
-        "agent_id": str(current_user.id),
+        "agent_id": agent_id,
         "lat": lat,
         "lng": lng,
-        "timestamp": datetime.utcnow()
+        "timestamp": datetime.now(timezone.utc)
     }
     db.agent_locations.insert_one(new_location)
     return {"status": "success"}
@@ -35,7 +46,7 @@ def get_active_agents(
     current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
     # Get last known location for each agent within the last 24 hours
-    since_last_period = datetime.utcnow() - timedelta(hours=24)
+    since_last_period = datetime.now(timezone.utc) - timedelta(hours=24)
     
     active_users = {str(u["_id"]): u.get("name") for u in db.users.find({"is_active": True})}
     
@@ -71,17 +82,16 @@ def get_agent_history(
     db: Database = Depends(get_db),
     current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
-    # Enforce history filtering per user status constraints
     try:
         obj_id = ObjectId(agent_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID format")
         
     agent = db.users.find_one({"_id": obj_id, "is_active": True})
     if not agent:
         return []
         
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     history = db.agent_locations.find(
         {"agent_id": agent_id, "timestamp": {"$gte": today}}
     ).sort("timestamp", 1)

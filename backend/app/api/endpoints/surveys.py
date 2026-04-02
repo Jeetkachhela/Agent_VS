@@ -3,7 +3,6 @@ from fastapi.responses import StreamingResponse
 from pymongo.database import Database
 from typing import List, Optional
 import os
-import shutil
 import uuid
 import pandas as pd
 import io
@@ -11,15 +10,12 @@ from ...db.session import get_db
 from ...schemas import SurveyQuestionOut, SurveyQuestionBase, UserOut, UserRole
 from ..deps import get_current_active_user, check_role
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import re
+import gridfs
 
 router = APIRouter()
-
-UPLOAD_DIR = "app/uploads"
-if not os.path.exists(UPLOAD_DIR):
-    os.makedirs(UPLOAD_DIR)
 
 # --- Question Management (Admins) ---
 @router.post("/questions", response_model=SurveyQuestionOut)
@@ -34,7 +30,7 @@ def create_question(
         "type": question_in.type,
         "phase": question_in.phase,
         "options": question_in.options,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc)
     }
     result = db.survey_questions.insert_one(new_question)
     new_question["id"] = str(result.inserted_id)
@@ -43,7 +39,8 @@ def create_question(
 @router.get("/questions", response_model=List[SurveyQuestionOut])
 def read_questions(
     db: Database = Depends(get_db),
-    phase: Optional[str] = None
+    phase: Optional[str] = None,
+    current_user: UserOut = Depends(get_current_active_user)
 ) -> List[SurveyQuestionOut]:
     query = {}
     if phase:
@@ -63,20 +60,18 @@ def delete_question(
 ):
     try:
         obj_id = ObjectId(question_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID format")
         
     question = db.survey_questions.find_one({"_id": obj_id})
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
         
-    # Check if there are submissions referencing this question
-    # We'll just search if any document has responses.question_id
-    survey_submissions = db.survey_submissions.find({})
-    for sub in survey_submissions:
-        if sub.get("responses") and question_id in sub["responses"]:
-            raise HTTPException(status_code=400, detail="Cannot delete question because it is referenced by existing survey submissions.")
-            
+    # Efficient check: use MongoDB query instead of loading all submissions
+    ref_count = db.survey_submissions.count_documents({f"responses.{question_id}": {"$exists": True}})
+    if ref_count > 0:
+        raise HTTPException(status_code=400, detail="Cannot delete question because it is referenced by existing survey submissions.")
+        
     db.survey_questions.delete_one({"_id": obj_id})
     return {"status": "success"}
 
@@ -92,15 +87,16 @@ async def submit_survey(
 ):
     if not re.match(r"^\d{10}$", client_contact):
         raise HTTPException(status_code=400, detail="Contact must be exactly 10 digits")
-        
+    
+    # Save images to MongoDB GridFS (works on ephemeral filesystems like Render)
+    fs = gridfs.GridFS(db)
     saved_images = []
     for image in images:
-        file_ext = os.path.splitext(image.filename)[1]
+        file_content = await image.read()
+        file_ext = os.path.splitext(image.filename)[1] if image.filename else ".jpg"
         file_name = f"{uuid.uuid4()}{file_ext}"
-        file_path = os.path.join(UPLOAD_DIR, file_name)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(image.file, buffer)
-        saved_images.append(file_name)
+        file_id = fs.put(file_content, filename=file_name, content_type=image.content_type or "image/jpeg")
+        saved_images.append({"file_id": str(file_id), "filename": file_name})
     
     new_submission = {
         "agent_id": str(current_user.id),
@@ -108,7 +104,7 @@ async def submit_survey(
         "client_contact": client_contact,
         "responses": json.loads(responses),
         "image_paths": saved_images,
-        "timestamp": datetime.utcnow()
+        "timestamp": datetime.now(timezone.utc)
     }
     result = db.survey_submissions.insert_one(new_submission)
     
@@ -117,21 +113,45 @@ async def submit_survey(
         "user_id": None,
         "message": f"Agent {current_user.name} submitted a survey for {client_name}.",
         "is_read": False,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc)
     }
     db.notifications.insert_one(new_notification)
     
     return {"status": "success", "submission_id": str(result.inserted_id)}
 
+# Serve images from GridFS
+@router.get("/images/{file_id}")
+def get_image(
+    file_id: str,
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user)
+):
+    fs = gridfs.GridFS(db)
+    try:
+        obj_id = ObjectId(file_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file ID")
+    
+    if not fs.exists(obj_id):
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    grid_out = fs.get(obj_id)
+    return StreamingResponse(
+        grid_out,
+        media_type=grid_out.content_type or "image/jpeg",
+        headers={"Content-Disposition": f"inline; filename={grid_out.filename}"}
+    )
+
 @router.get("/submissions")
 def get_all_submissions(
     db: Database = Depends(get_db),
+    skip: int = 0,
+    limit: int = 100,
     current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
-    submissions = list(db.survey_submissions.find())
+    submissions = list(db.survey_submissions.find().skip(skip).limit(limit))
     for sub in submissions:
         sub["id"] = str(sub.pop("_id"))
-        # we don't return Pydantic models array for this in old code natively, fastapi handles dicts
     return submissions
 
 @router.get("/export")
@@ -140,7 +160,7 @@ def export_data(
     db: Database = Depends(get_db),
     current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
-    submissions = list(db.survey_submissions.find())
+    submissions = list(db.survey_submissions.find().limit(10000))  # Cap at 10k to prevent OOM
     
     if not submissions:
         raise HTTPException(status_code=404, detail="No data available for export")
@@ -229,10 +249,10 @@ async def import_surveys(
             if pd.notna(timestamp_raw):
                 try: 
                     timestamp = pd.to_datetime(timestamp_raw).to_pydatetime()
-                except: 
-                    timestamp = datetime.utcnow()
+                except Exception: 
+                    timestamp = datetime.now(timezone.utc)
             else:
-                timestamp = datetime.utcnow()
+                timestamp = datetime.now(timezone.utc)
                 
             db.survey_submissions.insert_one({
                 "agent_id": str(agent["_id"]),

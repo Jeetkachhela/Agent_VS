@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from pymongo.database import Database
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from ...db.session import get_db
 from ...schemas import UserOut, UserRole
 from ..deps import get_current_active_user, check_role
@@ -8,7 +8,7 @@ from ..deps import get_current_active_user, check_role
 router = APIRouter()
 
 def get_last_7_days_trend(db: Database, role_filter=None, user_id=None):
-    end_date = datetime.utcnow()
+    end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=6)
     start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
     

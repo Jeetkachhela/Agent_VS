@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pymongo.database import Database
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 from ...db.session import get_db
 from ...core.security import verify_password, create_access_token
 from ...schemas import Token, UserOut, UserRole
@@ -42,24 +42,24 @@ def register(
     user_in: UserCreate,
     db: Database = Depends(get_db)
 ) -> UserOut:
+    # SECURITY: Only allow self-registration as AGENT
+    if user_in.role != UserRole.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Agent accounts can be self-registered. Contact your admin for elevated roles."
+        )
+
     user = db.users.find_one({"email": user_in.email})
     if user:
         raise HTTPException(status_code=400, detail="User with this email already exists")
     
-    # Use the role selected by the user during registration
-    try:
-        user_role = UserRole(user_in.role)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid role selected")
-    
-    from datetime import datetime
     new_user = {
         "email": user_in.email,
         "name": user_in.name,
         "hashed_password": get_password_hash(user_in.password),
-        "role": user_role.value,
+        "role": UserRole.AGENT.value,
         "is_active": True,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc)
     }
     result = db.users.insert_one(new_user)
     new_user["id"] = str(result.inserted_id)
@@ -67,7 +67,6 @@ def register(
 
 from pydantic import BaseModel
 import random
-from datetime import datetime, timedelta
 
 class ForgotPasswordRequest(BaseModel):
     email: str
@@ -87,7 +86,7 @@ def forgot_password(
         raise HTTPException(status_code=404, detail="User not found")
         
     otp = str(random.randint(100000, 999999))
-    expires_at = datetime.utcnow() + timedelta(minutes=15)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
     
     reset_entry = {
         "email": data.email, 
@@ -96,7 +95,11 @@ def forgot_password(
     }
     db.password_reset_otps.insert_one(reset_entry)
     
-    print(f"\n{'='*40}\n[EMAIL SIMULATION] To: {data.email}\nYour Kanan Password Reset OTP is: {otp}\nIt expires in 15 minutes.\n{'='*40}\n")
+    # NOTE: In production, integrate an email service (SendGrid, Resend, etc.)
+    # For now, OTP is logged to server console for testing
+    import logging
+    logger = logging.getLogger("kanan_ops")
+    logger.info(f"[OTP] Password reset OTP for {data.email}: {otp} (expires in 15 min)")
     
     return {"status": "success", "message": "OTP sent to email"}
 
@@ -114,7 +117,7 @@ def reset_password(
     if not otp_record:
         raise HTTPException(status_code=400, detail="Invalid OTP")
         
-    if otp_record["expires_at"] < datetime.utcnow():
+    if otp_record["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="OTP has expired")
         
     if len(data.new_password) < 6:

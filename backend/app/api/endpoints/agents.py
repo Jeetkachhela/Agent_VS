@@ -7,7 +7,7 @@ from ...schemas import UserOut, UserCreate, UserUpdate, UserRole
 from ...core.security import get_password_hash
 from ..deps import get_current_active_user, check_role
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timezone
 import pandas as pd
 import io
 
@@ -30,7 +30,7 @@ def create_agent(
         "name": agent_in.name,
         "role": agent_in.role.value,
         "is_active": True,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc)
     }
     result = db.users.insert_one(new_user)
     new_user["id"] = str(result.inserted_id)
@@ -64,7 +64,7 @@ def delete_agent(
 ) -> UserOut:
     try:
         obj_id = ObjectId(agent_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID format")
 
     agent = db.users.find_one({"_id": obj_id, "role": UserRole.AGENT.value})
@@ -83,7 +83,7 @@ def toggle_status(
 ) -> UserOut:
     try:
         obj_id = ObjectId(agent_id)
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid ID format")
 
     agent = db.users.find_one({"_id": obj_id})
@@ -145,7 +145,7 @@ async def import_agents(
                 "hashed_password": get_password_hash(password),
                 "role": valid_role.value,
                 "is_active": True,
-                "created_at": datetime.utcnow()
+                "created_at": datetime.now(timezone.utc)
             }
             db.users.insert_one(new_user)
             success_count += 1
@@ -160,7 +160,7 @@ def export_agents(
     db: Database = Depends(get_db),
     current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
-    agents = db.users.find()
+    agents = db.users.find().limit(5000)  # Cap to prevent OOM
     data = []
     for agent in agents:
         data.append({

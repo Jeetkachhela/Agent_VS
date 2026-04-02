@@ -1,7 +1,12 @@
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
-from .models import UserRole
+import enum
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from typing import Optional, List, Dict, Any
 from datetime import datetime
+
+class UserRole(str, enum.Enum):
+    SUPER_ADMIN = "SUPER_ADMIN"
+    ADMIN_B2C = "ADMIN_B2C"
+    AGENT = "AGENT"
 
 class UserBase(BaseModel):
     email: EmailStr
@@ -20,17 +25,16 @@ class UserUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 class UserOut(UserBase):
-    id: int
+    id: str
     created_at: datetime
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class Token(BaseModel):
     access_token: str
     token_type: str
 
 class TokenPayload(BaseModel):
-    sub: Optional[int] = None
+    sub: Optional[str] = None
 
 class SurveyQuestionBase(BaseModel):
     text: str = Field(..., min_length=3, max_length=500)
@@ -39,6 +43,15 @@ class SurveyQuestionBase(BaseModel):
     options: Optional[List[str]] = None
 
 class SurveyQuestionOut(SurveyQuestionBase):
-    id: int
-    class Config:
-        from_attributes = True
+    id: str
+    model_config = ConfigDict(from_attributes=True)
+
+class SurveySubmissionOut(BaseModel):
+    id: str
+    agent_id: str
+    client_name: str
+    client_contact: str
+    responses: Dict[str, Any]
+    image_paths: List[str]
+    timestamp: datetime
+    model_config = ConfigDict(from_attributes=True)

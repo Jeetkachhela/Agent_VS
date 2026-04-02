@@ -270,7 +270,7 @@ const SubmissionsHistory = ({ submissions, questions }) => (
                                 <h5 style={{ margin: '0 0 10px 0', fontSize: '0.85rem', opacity: 0.7, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Key Insights</h5>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                     {Object.entries(responses || {}).slice(0, 2).map(([qid, val]) => {
-                                        const question = questions.find(q => q.id === parseInt(qid));
+                                        const question = questions.find(q => String(q.id) === String(qid));
                                         return (
                                             <div key={qid} style={{ fontSize: '0.85rem' }}>
                                                 <div style={{ opacity: 0.4, fontSize: '0.75rem', marginBottom: '2px' }}>{question ? question.text : `Q${qid}`}</div>

@@ -1,19 +1,15 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
 import os
 from dotenv import load_dotenv
+from pymongo import MongoClient
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/agent_survey")
+DATABASE_URL = os.getenv("DATABASE_URL", "mongodb://localhost:27017/agent_survey")
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+client = MongoClient(DATABASE_URL)
+db = client.get_database("kanan_db") if "?auth" in DATABASE_URL else client.get_default_database()
+if db.name == 'test': # fallback if no db name in url
+    db = client.get_database("agent_survey")
 
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    yield db

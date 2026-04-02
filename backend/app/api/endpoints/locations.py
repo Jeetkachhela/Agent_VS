@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 from typing import List
 from datetime import datetime, timedelta
 from ...db.session import get_db
-from ...models import User, AgentLocation, UserRole
+from ...schemas import UserOut, UserRole
 from ..deps import get_current_active_user, check_role
+from bson import ObjectId
 
 router = APIRouter()
 
@@ -12,69 +13,85 @@ router = APIRouter()
 def update_location(
     lat: float,
     lng: float,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user)
 ):
     # Only agents can update their location
-    if current_user.role != UserRole.AGENT:
+    if current_user.role != UserRole.AGENT.value:
          raise HTTPException(status_code=403, detail="Only agents can update location")
     
-    new_location = AgentLocation(
-        agent_id=current_user.id,
-        lat=lat,
-        lng=lng,
-        timestamp=datetime.utcnow()
-    )
-    db.add(new_location)
-    db.commit()
+    new_location = {
+        "agent_id": str(current_user.id),
+        "lat": lat,
+        "lng": lng,
+        "timestamp": datetime.utcnow()
+    }
+    db.agent_locations.insert_one(new_location)
     return {"status": "success"}
 
 @router.get("/active")
 def get_active_agents(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
     # Get last known location for each agent within the last 24 hours
     since_last_period = datetime.utcnow() - timedelta(hours=24)
     
-    # Subquery for most recent location per agent
-    from sqlalchemy import func
-    subquery = db.query(
-        AgentLocation.agent_id,
-        func.max(AgentLocation.timestamp).label('max_ts')
-    ).filter(AgentLocation.timestamp >= since_last_period).group_by(AgentLocation.agent_id).subquery()
-
-    active_locations = db.query(AgentLocation, User.name)\
-        .join(subquery, (AgentLocation.agent_id == subquery.c.agent_id) & (AgentLocation.timestamp == subquery.c.max_ts))\
-        .join(User, User.id == AgentLocation.agent_id)\
-        .filter(User.is_active == True)\
-        .all()
-
-    return [
-        {
-            "agent_id": loc.agent_id,
-            "agent_name": name,
-            "lat": loc.lat,
-            "lng": loc.lng,
-            "timestamp": loc.timestamp
-        }
-        for loc, name in active_locations
+    active_users = {str(u["_id"]): u.get("name") for u in db.users.find({"is_active": True})}
+    
+    pipeline = [
+        {"$match": {"timestamp": {"$gte": since_last_period}}},
+        {"$sort": {"timestamp": -1}},
+        {"$group": {
+            "_id": "$agent_id",
+            "lat": {"$first": "$lat"},
+            "lng": {"$first": "$lng"},
+            "timestamp": {"$first": "$timestamp"}
+        }}
     ]
+    latest_locations = db.agent_locations.aggregate(pipeline)
+    
+    result = []
+    for loc in latest_locations:
+        agent_id = loc["_id"]
+        if agent_id in active_users:
+            result.append({
+                "agent_id": agent_id,
+                "agent_name": active_users[agent_id],
+                "lat": loc["lat"],
+                "lng": loc["lng"],
+                "timestamp": loc["timestamp"]
+            })
+
+    return result
 
 @router.get("/history/{agent_id}")
 def get_agent_history(
-    agent_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
+    agent_id: str,
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
     # Enforce history filtering per user status constraints
-    agent = db.query(User).filter(User.id == agent_id, User.is_active == True).first()
+    try:
+        obj_id = ObjectId(agent_id)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+        
+    agent = db.users.find_one({"_id": obj_id, "is_active": True})
     if not agent:
         return []
         
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    history = db.query(AgentLocation)\
-        .filter(AgentLocation.agent_id == agent_id, AgentLocation.timestamp >= today)\
-        .order_by(AgentLocation.timestamp.asc())\
-        .all()
-    return history
+    history = db.agent_locations.find(
+        {"agent_id": agent_id, "timestamp": {"$gte": today}}
+    ).sort("timestamp", 1)
+    
+    return [
+        {
+            "id": str(h["_id"]),
+            "agent_id": h["agent_id"],
+            "lat": h["lat"],
+            "lng": h["lng"],
+            "timestamp": h["timestamp"]
+        } for h in history
+    ]

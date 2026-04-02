@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 import os
 from dotenv import load_dotenv
-from ...models import User
+from ...schemas import UserOut
 from ..deps import get_current_active_user
 import logging
 import re
@@ -103,7 +103,7 @@ class ChatRequest(BaseModel):
 @router.post("/chat")
 async def chat_with_ai(
     request: ChatRequest,
-    current_user: User = Depends(get_current_active_user)
+    current_user: UserOut = Depends(get_current_active_user)
 ):
     try:
         response_text = await get_ai_response(request.message)

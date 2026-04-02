@@ -1,35 +1,41 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from pymongo.database import Database
 from typing import List
 from ...db.session import get_db
-from ...models import User, UserRole, Notification
+from ...schemas import UserOut, UserRole
 from ..deps import get_current_active_user, check_role
+from bson import ObjectId
 
 router = APIRouter()
 
 @router.get("/")
 def get_unread_notifications(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
     # Fetch all unread broadcast notifications or notifications specific to this user
-    notifs = db.query(Notification).filter(
-        Notification.is_read == False,
-        (Notification.user_id == current_user.id) | (Notification.user_id == None)
-    ).order_by(Notification.created_at.desc()).limit(20).all()
+    query = {
+        "is_read": False,
+        "$or": [{"user_id": str(current_user.id)}, {"user_id": None}]
+    }
     
-    return [{"id": n.id, "message": n.message, "created_at": n.created_at} for n in notifs]
+    notifs = db.notifications.find(query).sort("created_at", -1).limit(20)
+    
+    return [{"id": str(n["_id"]), "message": n.get("message"), "created_at": n.get("created_at")} for n in notifs]
 
 @router.post("/{notif_id}/read")
 def mark_read(
-    notif_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
+    notif_id: str,
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
-    notif = db.query(Notification).filter(Notification.id == notif_id).first()
-    if not notif:
+    try:
+        obj_id = ObjectId(notif_id)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+
+    result = db.notifications.update_one({"_id": obj_id}, {"$set": {"is_read": True}})
+    if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Notification not found")
     
-    notif.is_read = True
-    db.commit()
     return {"status": "success"}

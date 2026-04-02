@@ -1,16 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
-from sqlalchemy.orm import Session
+from fastapi.responses import StreamingResponse
+from pymongo.database import Database
 from typing import List, Optional
 import os
 import shutil
 import uuid
 import pandas as pd
-from fastapi.responses import StreamingResponse
 import io
 from ...db.session import get_db
-from ...models import User, UserRole, SurveyQuestion, SurveySubmission, Notification
-from ...schemas import SurveyQuestionOut, SurveyQuestionBase
+from ...schemas import SurveyQuestionOut, SurveyQuestionBase, UserOut, UserRole
 from ..deps import get_current_active_user, check_role
+from bson import ObjectId
+from datetime import datetime
+import json
+import re
 
 router = APIRouter()
 
@@ -22,48 +25,59 @@ if not os.path.exists(UPLOAD_DIR):
 @router.post("/questions", response_model=SurveyQuestionOut)
 def create_question(
     *,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     question_in: SurveyQuestionBase,
-    current_user: User = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
+    current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ) -> SurveyQuestionOut:
-    new_question = SurveyQuestion(
-        text=question_in.text,
-        type=question_in.type,
-        phase=question_in.phase,
-        options=question_in.options
-    )
-    db.add(new_question)
-    db.commit()
-    db.refresh(new_question)
-    return new_question
+    new_question = {
+        "text": question_in.text,
+        "type": question_in.type,
+        "phase": question_in.phase,
+        "options": question_in.options,
+        "created_at": datetime.utcnow()
+    }
+    result = db.survey_questions.insert_one(new_question)
+    new_question["id"] = str(result.inserted_id)
+    return SurveyQuestionOut(**new_question)
 
 @router.get("/questions", response_model=List[SurveyQuestionOut])
 def read_questions(
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     phase: Optional[str] = None
 ) -> List[SurveyQuestionOut]:
-    query = db.query(SurveyQuestion)
+    query = {}
     if phase:
-        query = query.filter(SurveyQuestion.phase == phase)
-    return query.all()
+        query["phase"] = phase
+    questions_cursor = db.survey_questions.find(query)
+    questions = []
+    for q in questions_cursor:
+        q["id"] = str(q.pop("_id"))
+        questions.append(SurveyQuestionOut(**q))
+    return questions
 
 @router.delete("/questions/{question_id}")
 def delete_question(
-    question_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
+    question_id: str,
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
-    question = db.query(SurveyQuestion).filter(SurveyQuestion.id == question_id).first()
+    try:
+        obj_id = ObjectId(question_id)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+        
+    question = db.survey_questions.find_one({"_id": obj_id})
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
         
-    submissions = db.query(SurveySubmission).all()
-    for sub in submissions:
-        if sub.responses and str(question_id) in sub.responses:
+    # Check if there are submissions referencing this question
+    # We'll just search if any document has responses.question_id
+    survey_submissions = db.survey_submissions.find({})
+    for sub in survey_submissions:
+        if sub.get("responses") and question_id in sub["responses"]:
             raise HTTPException(status_code=400, detail="Cannot delete question because it is referenced by existing survey submissions.")
             
-    db.delete(question)
-    db.commit()
+    db.survey_questions.delete_one({"_id": obj_id})
     return {"status": "success"}
 
 # --- Submissions (Agents) ---
@@ -73,14 +87,12 @@ async def submit_survey(
     client_contact: str = Form(...),
     responses: str = Form(...), # JSON string
     images: List[UploadFile] = File(default=[]),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user)
 ):
-    # Validation for contact
-    import re
     if not re.match(r"^\d{10}$", client_contact):
         raise HTTPException(status_code=400, detail="Contact must be exactly 10 digits")
-    # Save images
+        
     saved_images = []
     for image in images:
         file_ext = os.path.splitext(image.filename)[1]
@@ -90,59 +102,64 @@ async def submit_survey(
             shutil.copyfileobj(image.file, buffer)
         saved_images.append(file_name)
     
-    import json
-    new_submission = SurveySubmission(
-        agent_id=current_user.id,
-        client_name=client_name,
-        client_contact=client_contact,
-        responses=json.loads(responses),
-        image_paths=saved_images
-    )
-    db.add(new_submission)
+    new_submission = {
+        "agent_id": str(current_user.id),
+        "client_name": client_name,
+        "client_contact": client_contact,
+        "responses": json.loads(responses),
+        "image_paths": saved_images,
+        "timestamp": datetime.utcnow()
+    }
+    result = db.survey_submissions.insert_one(new_submission)
     
     # Broadcast Notification to all Admins (user_id=None)
-    new_notification = Notification(
-        user_id=None,
-        message=f"Agent {current_user.name} submitted a survey for {client_name}.",
-        is_read=False
-    )
-    db.add(new_notification)
+    new_notification = {
+        "user_id": None,
+        "message": f"Agent {current_user.name} submitted a survey for {client_name}.",
+        "is_read": False,
+        "created_at": datetime.utcnow()
+    }
+    db.notifications.insert_one(new_notification)
     
-    db.commit()
-    db.refresh(new_submission)
-    return {"status": "success", "submission_id": new_submission.id}
+    return {"status": "success", "submission_id": str(result.inserted_id)}
 
 @router.get("/submissions")
 def get_all_submissions(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
-    return db.query(SurveySubmission).all()
+    submissions = list(db.survey_submissions.find())
+    for sub in submissions:
+        sub["id"] = str(sub.pop("_id"))
+        # we don't return Pydantic models array for this in old code natively, fastapi handles dicts
+    return submissions
 
 @router.get("/export")
 def export_data(
     format: str = 'csv',
-    db: Session = Depends(get_db),
-    current_user: User = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
-    submissions = db.query(SurveySubmission, User.name)\
-        .join(User, User.id == SurveySubmission.agent_id).all()
+    submissions = list(db.survey_submissions.find())
     
     if not submissions:
         raise HTTPException(status_code=404, detail="No data available for export")
+        
+    # Build dictionary map of agent IDs to names for O(1) lookups
+    users = {str(u["_id"]): u.get("name", "Unknown") for u in db.users.find({}, {"name": 1})}
     
     data = []
-    for s, name in submissions:
+    for s in submissions:
         data_row = {
-            "Agent": name,
-            "Client": s.client_name,
-            "Contact": s.client_contact,
-            "Timestamp": s.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            "Agent": users.get(s.get("agent_id"), "Unknown Agent"),
+            "Client": s.get("client_name"),
+            "Contact": s.get("client_contact"),
+            "Timestamp": s.get("timestamp").strftime("%Y-%m-%d %H:%M:%S") if isinstance(s.get("timestamp"), datetime) else ""
         }
         # Flatten responses JSON
-        if s.responses:
-            import json
-            for q_id, val in s.responses.items():
+        responses = s.get("responses", {})
+        if responses:
+            for q_id, val in responses.items():
                 data_row[f"Q_{q_id}"] = val
         data.append(data_row)
     
@@ -170,8 +187,8 @@ def export_data(
 @router.post("/import", status_code=status.HTTP_201_CREATED)
 async def import_surveys(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
+    db: Database = Depends(get_db),
+    current_user: UserOut = Depends(check_role([UserRole.SUPER_ADMIN, UserRole.ADMIN_B2C]))
 ):
     contents = await file.read()
     try:
@@ -185,8 +202,6 @@ async def import_surveys(
         success_count = 0
         warnings = []
         
-        from datetime import datetime
-        
         for index, row in df.iterrows():
             agent_name = str(row.get('Agent', '')).strip()
             client_name = str(row.get('Client', '')).strip()
@@ -196,7 +211,7 @@ async def import_surveys(
                 warnings.append(f"Row {index + 2}: Missing Agent name.")
                 continue
                 
-            agent = db.query(User).filter(User.name == agent_name).first()
+            agent = db.users.find_one({"name": agent_name})
             if not agent:
                 warnings.append(f"Row {index + 2}: Agent '{agent_name}' does not match any active database account.")
                 continue
@@ -219,18 +234,16 @@ async def import_surveys(
             else:
                 timestamp = datetime.utcnow()
                 
-            db.add(SurveySubmission(
-                agent_id=agent.id,
-                client_name=client_name,
-                client_contact=client_contact,
-                responses=responses,
-                timestamp=timestamp,
-                image_paths=[]
-            ))
+            db.survey_submissions.insert_one({
+                "agent_id": str(agent["_id"]),
+                "client_name": client_name,
+                "client_contact": client_contact,
+                "responses": responses,
+                "timestamp": timestamp,
+                "image_paths": []
+            })
             success_count += 1
             
-        db.commit()
-        
         status_type = "success" if success_count > 0 else "error"
         if len(warnings) > 0 and success_count > 0:
             status_type = "partial"
@@ -243,5 +256,4 @@ async def import_surveys(
         }
         
     except Exception as e:
-        db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")

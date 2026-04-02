@@ -4,12 +4,14 @@ from pymongo import MongoClient
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "mongodb://localhost:27017/agent_survey")
+# We no longer fall back to localhost to prevent local DB accidents in deployment.
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable is not set!")
 
 client = MongoClient(DATABASE_URL)
-db = client.get_database("kanan_db") if "?auth" in DATABASE_URL else client.get_default_database()
-if db.name == 'test': # fallback if no db name in url
-    db = client.get_database("agent_survey")
+db = client.get_default_database()
 
 def get_db():
     yield db

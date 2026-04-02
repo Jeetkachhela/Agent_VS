@@ -22,7 +22,7 @@ const Login = () => {
             formData.append('username', email)
             formData.append('password', password)
 
-            const loginRes = await api.post('/auth/login', formData, {
+            const loginRes = await api.post('auth/login', formData, {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
             })
             
@@ -30,7 +30,7 @@ const Login = () => {
             localStorage.setItem('token', token)
             
             // Get user profile to check real role
-            const userRes = await api.get('/auth/me', {
+            const userRes = await api.get('auth/me', {
                 headers: { Authorization: `Bearer ${token}` }
             })
             const user = userRes.data

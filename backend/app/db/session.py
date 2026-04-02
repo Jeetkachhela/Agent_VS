@@ -13,18 +13,25 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set!")
 
-# Optimized for serverless (Vercel/Render): small pool, short timeouts, SSL certs
-client = MongoClient(
-    DATABASE_URL,
-    maxPoolSize=5,              # Serverless doesn't need many connections
-    minPoolSize=1,              # Keep 1 warm connection if possible
-    serverSelectionTimeoutMS=5000,   # Fail fast if Atlas is unreachable
-    connectTimeoutMS=5000,
-    socketTimeoutMS=10000,
-    retryWrites=True,
-    tlsCAFile=certifi.where()
-)
-db = client.get_default_database()
+try:
+    client = MongoClient(
+        DATABASE_URL,
+        maxPoolSize=5,
+        minPoolSize=1,
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=5000,
+        socketTimeoutMS=10000,
+        retryWrites=True,
+        tlsCAFile=certifi.where()
+    )
+    # Ping the database to verify connection
+    client.admin.command('ping')
+    logger.info("Successfully connected to MongoDB Atlas.")
+    db = client.get_default_database()
+    logger.info(f"Using database: {db.name}")
+except Exception as e:
+    logger.error(f"Failed to connect to MongoDB Atlas: {e}")
+    raise
 
 # Create indexes once (MongoDB is idempotent, so this is safe to call repeatedly)
 try:

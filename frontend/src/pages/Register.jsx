@@ -31,7 +31,7 @@ const Register = () => {
         }
 
         try {
-            await api.post('/auth/register', {
+            await api.post('auth/register', {
                 name,
                 email,
                 password,

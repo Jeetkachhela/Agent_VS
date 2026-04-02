@@ -110,7 +110,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Kanan Agent Visit Survey System", version="1.0.0", lifespan=lifespan)
 
 # CORS: Use env var or restrictive defaults
-cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000")
+cors_origins_str = os.getenv("CORS_ORIGINS", "*") # Default to all for troubleshooting, but restricted is better
 cors_origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
 
 app.add_middleware(
@@ -121,7 +121,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create uploads directory safely for serverless environments
+# ... existing uploads directory logic ...
+
 UPLOAD_DIR = "app/uploads"
 try:
     if not os.path.exists(UPLOAD_DIR):
@@ -130,6 +131,7 @@ try:
 except OSError:
     logger.warning("Running in a read-only filesystem. Local uploads will not be persisted.")
 
+# Auth endpoints are included under /api/auth
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
 app.include_router(surveys.router, prefix="/api/surveys", tags=["surveys"])
@@ -139,5 +141,6 @@ app.include_router(chatbot.router, prefix="/api/chatbot", tags=["chatbot"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["notifications"])
 
 @app.get("/")
+@app.get("/api") # Add direct /api health check
 def read_root():
     return {"status": "ok", "message": "Kanan Agent Visit API is running"}

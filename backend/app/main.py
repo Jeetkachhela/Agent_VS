@@ -32,18 +32,21 @@ app.add_middleware(
 @app.on_event("startup")
 def create_initial_super_admin():
     import datetime
-    admin = db.users.find_one({"role": UserRole.SUPER_ADMIN.value})
-    if not admin:
-        new_admin = {
-            "name": "Super Admin",
-            "email": "admin@kanan.com",
-            "hashed_password": get_password_hash("admin123"),
-            "role": UserRole.SUPER_ADMIN.value,
-            "is_active": True,
-            "created_at": datetime.datetime.utcnow()
-        }
-        db.users.insert_one(new_admin)
-        print("Initial super admin created: admin@kanan.com / admin123")
+    try:
+        admin = db.users.find_one({"role": UserRole.SUPER_ADMIN.value})
+        if not admin:
+            new_admin = {
+                "name": "Super Admin",
+                "email": "admin@kanan.com",
+                "hashed_password": get_password_hash("admin123"),
+                "role": UserRole.SUPER_ADMIN.value,
+                "is_active": True,
+                "created_at": datetime.datetime.utcnow()
+            }
+            db.users.insert_one(new_admin)
+            print("Initial super admin created: admin@kanan.com / admin123")
+    except Exception as e:
+        logger.error(f"Failed to create initial super admin during startup: {e}")
 
 # Create uploads directory safely for serverless environments (like Vercel)
 UPLOAD_DIR = "app/uploads"

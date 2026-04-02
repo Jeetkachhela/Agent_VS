@@ -13,3 +13,4 @@ openpyxl
 groq
 google-generativeai
 python-jose[cryptography]
+certifi

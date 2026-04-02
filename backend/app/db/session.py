@@ -2,6 +2,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from pymongo import MongoClient, ASCENDING
+import certifi
 
 load_dotenv()
 logger = logging.getLogger("kanan_ops")
@@ -12,7 +13,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set!")
 
-# Optimized for serverless (Vercel): small pool, short timeouts
+# Optimized for serverless (Vercel/Render): small pool, short timeouts, SSL certs
 client = MongoClient(
     DATABASE_URL,
     maxPoolSize=5,              # Serverless doesn't need many connections
@@ -21,6 +22,7 @@ client = MongoClient(
     connectTimeoutMS=5000,
     socketTimeoutMS=10000,
     retryWrites=True,
+    tlsCAFile=certifi.where()
 )
 db = client.get_default_database()
 
